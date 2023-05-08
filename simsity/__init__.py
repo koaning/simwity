@@ -95,7 +95,7 @@ def create_index(
     space: str = "cosine",
     pbar: bool = True,
     batch_size: int = 500,
-):
+) -> "SimSityIndex":
     """
     Creates a simple ANN index. Uses hnswlib under the hood.
     You need to provide a scikit-learn compatible encoder for the data manually.
@@ -140,7 +140,7 @@ def create_index(
     return SimSityIndex(index=index, encoder=encoder, db=db)
 
 
-def load_index(path: Union[str, Path], encoder: EncType):
+def load_index(path: Union[str, Path], encoder: EncType) -> "SimSityIndex":
     """Load in a simsity index from a path. Must supply same encoder."""
     path = Path(path)
     metadata = srsly.read_json(path / METADATA_NAME)

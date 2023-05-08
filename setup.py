@@ -17,7 +17,7 @@ dev_packages = all_packages + test_packages
 
 setup(
     name="simsity",
-    version="0.5.4",
+    version="0.6.0",
     author="Vincent D. Warmerdam",
     packages=find_packages(exclude=["notebooks", "docs"]),
     description="Super Simple Similarity Service",
