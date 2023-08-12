@@ -1,3 +1,5 @@
+import mmh3 
+from diskcache import Cache
 from queue import LifoQueue
 import datetime as dt
 import itertools as it
@@ -13,8 +15,12 @@ INDEX_NAME = "index.bin"
 METADATA_NAME = "metadata.json"
 
 
+def create_hash(thing):
+    return mmh3.hash(str(thing), signed=False)
+
+
 class Transformer(Protocol):
-    def transform(self):
+    def transform(self, X, y=None):
         pass
 
 
@@ -24,10 +30,10 @@ EncType = Union[Callable, Transformer]
 class SimSityIndex:
     """Object for easy querying."""
 
-    def __init__(self, index: Index, encoder: EncType, db: Dict[int, Any]) -> None:
+    def __init__(self, index: Index, encoder: EncType, cache: Cache) -> None:
         self.index = index
         self.encoder = encoder
-        self.db = db
+        self.cache = cache
 
     def query(self, query: Union[str, Dict], n: int = 10):
         """
@@ -73,57 +79,11 @@ class SimSityIndex:
                         new_args.append(item)
                         seen[uniq_id(item)] = 1
             args = new_args
-
-
-def batch(iterable, n=1):
-    length = len(iterable)
-    for ndx in range(0, length, n):
-        yield iterable[ndx : min(ndx + n, length)]
-
-
-def encode_data(encoder, data):
-    if callable(encoder):
-        return encoder(data)
-    else:
-        return encoder.transform(data)
-
-
-def create_index(
-    data: list,
-    encoder: Union[Transformer, Callable],
-    path: Optional[Union[Path, str]] = None,
-    space: str = "cosine",
-    pbar: bool = True,
-    batch_size: int = 500,
-):
-    """
-    Creates a simple ANN index. Uses hnswlib under the hood.
-    You need to provide a scikit-learn compatible encoder for the data manually.
-    """
-    index = None
-    dim = 0
-    batches = batch(data, batch_size)
-    if pbar:
-        batches, batches_copy = it.tee(batches)
-        total = sum(1 for _ in batches_copy)
-        batches = tqdm(batches, desc="indexing", total=total)
-    for b in batches:
-        encoded = encode_data(encoder, b)
-        if not index:
-            dim = encoded.shape[1]
-            index = Index(space=space, dim=dim)
-            index.init_index(max_elements=len(data))
-        index.add_items(encoded)
-    if not index:
-        raise RuntimeError(
-            "Something has gone terrible wrong. There is no index. Did you supply data?"
-        )
-    if path:
+    
+    def to_disk(self, path: Union[str, Path]):
+        """Store the index to disk, with metadata"""
         path = Path(path)
         path.mkdir(parents=True, exist_ok=True)
-        if (path / DB_NAME).exists():
-            (path / DB_NAME).unlink()
-        srsly.write_gzip_json(path / DB_NAME, {i: item for i, item in enumerate(data)})
         index.save_index(str(path / INDEX_NAME))
         metadata = {
             "created": str(dt.datetime.now())[:19],
@@ -136,8 +96,65 @@ def create_index(
             path / METADATA_NAME,
             metadata,
         )
-    db = {i: k for i, k in enumerate(data)}
-    return SimSityIndex(index=index, encoder=encoder, db=db)
+
+
+def batch(iterable, n=1):
+    length = len(iterable)
+    for ndx in range(0, length, n):
+        yield iterable[ndx : min(ndx + n, length)]
+
+
+def encode_data(encoder, data):
+    if callable(encoder):
+        return encoder(data)
+    else:
+        return encoder.transform([data])
+
+
+def create_index(
+    data: list,
+    encoder: Union[Transformer, Callable],
+    path: Union[Path, str],
+    space: str = "cosine",
+    pbar: bool = True,
+    batch_size: int = 500,
+):
+    """
+    Creates a simple ANN index. Uses hnswlib under the hood.
+    You need to provide a scikit-learn compatible encoder.
+    """
+    index = None
+    dim = 0
+    batches = batch(data, batch_size)
+    cache = Cache(path)
+    
+    if pbar:
+        batches, batches_copy = it.tee(batches)
+        total = sum(1 for _ in batches_copy)
+        batches = tqdm(batches, desc="indexing", total=total)
+    for batch in batches:
+        hash_table = {
+            create_hash(item): item 
+            for item in batch 
+            if create_hash(item) not in cache
+        }
+        encoded = encode_data(encoder, list(hash_table.values()))
+        if not index:
+            # We need to know the size of the vectors before we can init the database.
+            dim = encoded.shape[1]
+            index = Index(space=space, dim=dim)
+            index.init_index(max_elements=len(data))
+        index.add_items(encoded, ids=hash_table.key())
+        with Cache(cache.directory) as reference:
+            for key, value in hash_table.items():
+                reference.set(key, value)
+    if not index:
+        raise RuntimeError(
+            "Something has gone terrible wrong. There is no index. Did you supply data?"
+        )
+    index = SimSityIndex(index=index, encoder=encoder, cache=cache)
+    index.to_disk(path)
+    return index
 
 
 def load_index(path: Union[str, Path], encoder: EncType):
